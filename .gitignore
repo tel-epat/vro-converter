@@ -1,0 +1,14 @@
+node_modules/
+.DS_Store
+*.log
+
+# media you test with locally
+*.vro
+*.VRO
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.mpg
+*.mp3
+*.m4a

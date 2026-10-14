@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VRO Converter</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>VRO Converter</h1>
+      <p class="sub">Convert DVD-VR <code>.VRO</code> recordings to MP4 and other formats. Runs on this computer — files are never uploaded anywhere else.</p>
+    </header>
+
+    <section class="settings" aria-label="Conversion settings">
+      <label>
+        <span>Format</span>
+        <select id="format"></select>
+      </label>
+      <label>
+        <span>Quality</span>
+        <select id="quality"></select>
+      </label>
+      <label>
+        <span>Deinterlace</span>
+        <select id="deinterlace"></select>
+      </label>
+    </section>
+
+    <label id="drop" class="drop" tabindex="0">
+      <input id="file" type="file" multiple accept=".vro,.VRO,.vob,.VOB,.mpg,.mpeg,.ts,video/*">
+      <strong>Drop .VRO files here</strong>
+      <span>or click to choose · several at once is fine</span>
+    </label>
+
+    <p id="banner" class="banner" hidden></p>
+
+    <section aria-label="Conversions">
+      <ul id="jobs" class="jobs"></ul>
+    </section>
+
+    <footer>
+      <p>Tip: on a DVD-RAM/-RW disc the recordings are in <code>DVD_RTAV/VR_MOVIE.VRO</code>. Settings apply to files added after you change them.</p>
+    </footer>
+  </main>
+
+  <template id="job-tpl">
+    <li class="job">
+      <div class="row">
+        <div class="names">
+          <span class="name"></span>
+          <span class="arrow">→</span>
+          <span class="out"></span>
+        </div>
+        <div class="actions">
+          <a class="btn primary download" hidden>Download</a>
+          <button class="btn remove" type="button">Cancel</button>
+        </div>
+      </div>
+      <div class="bar"><div class="fill"></div></div>
+      <div class="meta">
+        <span class="status"></span>
+        <span class="detail"></span>
+      </div>
+    </li>
+  </template>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
