@@ -3,6 +3,7 @@
 
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
 
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
@@ -77,6 +78,21 @@ export const FORMATS = {
 
 export const DEFAULT_FORMAT = 'mp4';
 
+export const ASPECTS = ['4:3', '16:9'];
+
+/**
+ * ffmpeg input URL for a whole file or a byte range of it. The subfile protocol
+ * reads a range in place, so splitting a multi-GB VRO needs no temporary copies.
+ */
+export function inputUrl(file, range) {
+  if (!range) return file;
+  const { offset, size } = range;
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(size) || offset < 0 || size <= 0) {
+    throw new Error(`Invalid byte range ${offset}+${size}`);
+  }
+  return `subfile,,start,${offset},end,${offset + size},,:file:${path.resolve(file)}`;
+}
+
 function videoArgs(codec, quality) {
   const q = QUALITIES[quality];
   if (codec === 'x264') {
@@ -102,18 +118,26 @@ function audioArgs(codec, quality) {
  * Build the ffmpeg argument list (no shell involved — safe for any file name).
  * Pure function, exported for testing.
  */
-export function buildArgs({ input, output, format = DEFAULT_FORMAT, quality = 'balanced', deinterlace = 'auto' }) {
+export function buildArgs({
+  input, output, format = DEFAULT_FORMAT, quality = 'balanced', deinterlace = 'auto',
+  aspect = null, creationTime = null,
+}) {
   const fmt = FORMATS[format];
   if (!fmt) throw new Error(`Unknown format "${format}". Options: ${Object.keys(FORMATS).join(', ')}`);
   if (!QUALITIES[quality]) throw new Error(`Unknown quality "${quality}". Options: ${Object.keys(QUALITIES).join(', ')}`);
   if (!DEINTERLACE[deinterlace]) throw new Error(`Unknown deinterlace mode "${deinterlace}". Options: ${Object.keys(DEINTERLACE).join(', ')}`);
+  if (aspect !== null && !ASPECTS.includes(aspect)) throw new Error(`Unknown aspect "${aspect}". Options: ${ASPECTS.join(', ')}`);
 
   const args = ['-hide_banner', '-nostdin', '-y', ...INPUT_FLAGS, '-i', input];
 
   if (fmt.copy) {
     // Straight remux into a clean MPEG program stream: keeps original quality,
     // fixes timestamps, drops DVD-VR navigation packets. VOB muxer handles AC3/LPCM.
-    args.push('-map', '0:v:0?', '-map', '0:a?', '-c', 'copy', '-f', 'vob');
+    args.push('-map', '0:v:0?', '-map', '0:a?', '-c', 'copy');
+    // Camcorders often flag 16:9 footage as 4:3 inside the MPEG stream; rewrite the
+    // sequence header without re-encoding.
+    if (aspect) args.push('-bsf:v', `mpeg2_metadata=display_aspect_ratio=${aspect.replace(':', '/')}`);
+    args.push('-f', 'vob');
   } else {
     if (fmt.video) {
       args.push('-map', '0:v:0');
@@ -124,6 +148,7 @@ export function buildArgs({ input, output, format = DEFAULT_FORMAT, quality = 'b
         args.push('-vf', `yadif=mode=send_frame:deint=${mode}`);
       }
       args.push(...videoArgs(fmt.video, quality));
+      if (aspect) args.push('-aspect', aspect);
       args.push('-map', '0:a:0?');
     } else {
       // audio-only output: fail clearly if there is no audio
@@ -131,6 +156,8 @@ export function buildArgs({ input, output, format = DEFAULT_FORMAT, quality = 'b
     }
     args.push(...audioArgs(fmt.audio, quality));
   }
+
+  if (creationTime) args.push('-metadata', `creation_time=${creationTime.toISOString()}`);
 
   args.push(
     '-sn', '-dn',
@@ -237,17 +264,24 @@ export async function availableFormats() {
  */
 export async function convert({
   input, output, format = DEFAULT_FORMAT, quality = 'balanced', deinterlace = 'auto',
-  onProgress, signal,
+  range = null, aspect = null, recordedAt = null, onProgress, signal,
 }) {
-  const args = buildArgs({ input, output, format, quality, deinterlace });
+  const source = inputUrl(input, range);
+  // Write to a hidden temp name next to the target and rename on success, so an
+  // interrupted run never leaves a truncated file under the final name.
+  const { dir, name, ext } = path.parse(output);
+  const partial = path.join(dir, `.${name}.partial${ext}`);
+  const creationTime = recordedAt && !Number.isNaN(recordedAt.getTime()) ? recordedAt : null;
+  const args = buildArgs({ input: source, output: partial, format, quality, deinterlace, aspect, creationTime });
 
   // Probe first so bad inputs fail fast with a clear message, and to get duration for progress.
   let info;
   try {
-    info = await probe(input);
+    info = await probe(source);
   } catch (err) {
     const reason = err.message.split('\n').pop().replace(/^.*?:\s(?=[A-Z])/, '');
-    throw new Error(`Could not read "${input}" as video — ${reason}`);
+    const what = range ? `bytes ${range.offset}–${range.offset + range.size} of "${input}"` : `"${input}"`;
+    throw new Error(`Could not read ${what} as video — ${reason}`);
   }
   if (!info.video && FORMATS[format].video) {
     throw new Error('No video stream found in the input file.');
@@ -313,15 +347,18 @@ export async function convert({
       finish(new Error(`ffmpeg failed (exit ${code}):\n${stderrTail.slice(-8).join('\n')}`));
     });
   }).catch(async (err) => {
-    await fs.rm(output, { force: true });
+    await fs.rm(partial, { force: true });
     throw err;
   });
 
-  const stat = await fs.stat(output).catch(() => null);
+  const stat = await fs.stat(partial).catch(() => null);
   if (!stat || stat.size === 0) {
-    await fs.rm(output, { force: true });
+    await fs.rm(partial, { force: true });
     throw new Error('ffmpeg finished but produced an empty file.');
   }
+  await fs.rename(partial, output);
+  // File date = when it was filmed, so Finder/Photos sort recordings correctly.
+  if (creationTime) await fs.utimes(output, creationTime, creationTime).catch(() => {});
   return { output, info };
 }
 

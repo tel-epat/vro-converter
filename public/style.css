@@ -168,3 +168,46 @@ footer { margin-top: 40px; color: var(--muted); font-size: 13px; }
   .actions { justify-content: flex-end; }
   .meta { flex-direction: column; gap: 2px; }
 }
+
+/* ---- split by recording ---- */
+.settings .wide { grid-column: 1 / -1; }
+.settings small { text-transform: none; letter-spacing: 0; font-size: 12px; }
+
+.note {
+  margin: 16px 0 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line));
+}
+.note button { margin-left: 8px; }
+
+.hint { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+
+.recs { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 8px; }
+.recs summary { cursor: pointer; font-size: 13px; color: var(--muted); padding: 2px 0; }
+.rec-list { list-style: none; margin: 6px 0 0; padding: 0; max-height: 360px; overflow-y: auto; }
+.rec {
+  display: grid;
+  grid-template-columns: 3.2em 1fr 3.6em 9em 5.5em;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 2px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+.rec:last-child { border-bottom: 0; }
+.rec-num { color: var(--muted); }
+.rec-len { color: var(--muted); text-align: right; }
+.rec-state { color: var(--muted); white-space: nowrap; }
+.rec.done .rec-state { color: var(--ok); }
+.rec.error .rec-state { color: var(--err); }
+.rec.converting .rec-state { color: var(--accent); font-weight: 600; }
+.rec-dl { color: var(--accent); text-decoration: none; text-align: right; }
+.rec-dl:hover { text-decoration: underline; }
+
+@media (max-width: 560px) {
+  .rec { grid-template-columns: 2.6em 1fr 3.4em 5.5em; }
+  .rec-state { display: none; }
+}

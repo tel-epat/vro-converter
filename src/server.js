@@ -2,12 +2,15 @@
 // Binds to 127.0.0.1 by default: files never leave your machine.
 //
 // API
-//   GET    /api/formats             formats + options this machine supports
-//   GET    /api/jobs                all jobs
-//   POST   /api/jobs?name=&format=&quality=&deinterlace=   body: raw file bytes
-//   GET    /api/jobs/:id            job status + progress
-//   GET    /api/jobs/:id/download   converted file
-//   DELETE /api/jobs/:id            cancel and delete
+//   GET    /api/formats                     formats + options this machine supports
+//   POST   /api/ifo                         body: VR_MANGR.IFO → { id, recordings[] }
+//   GET    /api/jobs                        all jobs
+//   POST   /api/jobs?name=&format=&quality=&deinterlace=[&ifo=<id>&mode=split|join]
+//                                           body: raw file bytes
+//   GET    /api/jobs/:id                    job status + progress (+ per-recording parts)
+//   GET    /api/jobs/:id/download           converted file, or a .zip of all recordings
+//   GET    /api/jobs/:id/parts/:n/download  one recording
+//   DELETE /api/jobs/:id                    cancel and delete
 
 import http from 'node:http';
 import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
@@ -20,9 +23,14 @@ import { fileURLToPath } from 'node:url';
 import {
   convert, availableFormats, FORMATS, QUALITIES, DEINTERLACE, DEFAULT_FORMAT,
 } from './convert.js';
+import {
+  parseIfo, checkAgainstVro, planRecordings, commonAspect,
+} from './ifo.js';
+import { crc32File, layoutZip, writeZip } from './zip.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const JOB_TTL_MS = 6 * 60 * 60 * 1000;
+const MAX_IFO_BYTES = 4 * 1024 * 1024;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -68,7 +76,21 @@ export async function createApp({ workDir, concurrency = 1 } = {}) {
     outputSize: job.outputSize ?? null,
     info: job.info ?? null,
     createdAt: job.createdAt,
+    mode: job.parts ? 'split' : 'single',
+    parts: job.parts?.map((p) => ({
+      number: p.number,
+      recorded: p.recorded,
+      duration: p.duration,
+      label: p.label,
+      fileName: p.fileName,
+      status: p.status,
+      percent: p.percent,
+      size: p.size ?? null,
+      error: p.error ?? null,
+    })) ?? null,
   });
+
+  const ifos = new Map();
 
   function pump() {
     while (running < concurrency && queue.length) {
@@ -79,9 +101,12 @@ export async function createApp({ workDir, concurrency = 1 } = {}) {
     }
   }
 
+  const cleanError = (job, err) => err.message.replaceAll(job.inputPath, job.name).replaceAll(job.dir, '');
+
   async function runJob(job) {
     job.status = 'converting';
     job.progress = { percent: 0, seconds: 0, speed: null, duration: null };
+    if (job.parts) return runSplitJob(job);
     try {
       const { info } = await convert({
         input: job.inputPath,
@@ -89,6 +114,7 @@ export async function createApp({ workDir, concurrency = 1 } = {}) {
         format: job.format,
         quality: job.quality,
         deinterlace: job.deinterlace,
+        aspect: job.aspect ?? null,
         signal: job.controller.signal,
         onProgress: (p) => { job.progress = p; },
       });
@@ -101,13 +127,71 @@ export async function createApp({ workDir, concurrency = 1 } = {}) {
       if (job.status === 'cancelled') return;
       job.status = 'error';
       // Show the user's file name, not our temp path.
-      job.error = err.message.replaceAll(job.inputPath, job.name).replaceAll(job.dir, '');
+      job.error = cleanError(job, err);
       job.finishedAt = Date.now();
     } finally {
       // Source upload is no longer needed once conversion is over.
       await fs.rm(job.inputPath, { force: true }).catch(() => {});
     }
   }
+
+  async function runSplitJob(job) {
+    const totalSeconds = job.parts.reduce((s, p) => s + (p.duration ?? 0), 0) || null;
+    let doneSeconds = 0;
+    try {
+      for (const [i, part] of job.parts.entries()) {
+        if (job.controller.signal.aborted) return;
+        part.status = 'converting';
+        part.percent = 0;
+        job.current = i;
+        try {
+          await convert({
+            input: job.inputPath,
+            output: part.outputPath,
+            range: part.range,
+            aspect: part.aspect,
+            recordedAt: part.recordedAt,
+            format: job.format,
+            quality: job.quality,
+            deinterlace: job.deinterlace,
+            signal: job.controller.signal,
+            onProgress: (p) => {
+              part.percent = p.percent;
+              const partSeconds = Math.min(p.seconds, part.duration ?? p.seconds);
+              job.progress = {
+                percent: totalSeconds ? Math.min(99.9, ((doneSeconds + partSeconds) / totalSeconds) * 100)
+                  : ((i + (p.percent ?? 0) / 100) / job.parts.length) * 100,
+                seconds: doneSeconds + partSeconds,
+                duration: totalSeconds,
+                speed: p.speed,
+              };
+            },
+          });
+          part.size = (await fs.stat(part.outputPath)).size;
+          part.crc = await crc32File(part.outputPath);
+          part.status = 'done';
+          part.percent = 100;
+        } catch (err) {
+          if (job.controller.signal.aborted) return;
+          part.status = 'error';
+          part.error = cleanError(job, err);
+        }
+        doneSeconds += part.duration ?? 0;
+      }
+      const ok = job.parts.filter((p) => p.status === 'done');
+      job.outputSize = ok.length ? layoutZip(zipEntries(job)).size : 0;
+      job.status = ok.length ? 'done' : 'error';
+      if (!ok.length) job.error = `None of the ${job.parts.length} recordings could be converted. First error: ${job.parts[0]?.error ?? 'unknown'}`;
+      job.progress = { ...job.progress, percent: 100 };
+      job.finishedAt = Date.now();
+    } finally {
+      await fs.rm(job.inputPath, { force: true }).catch(() => {});
+    }
+  }
+
+  const zipEntries = (job) => job.parts
+    .filter((p) => p.status === 'done')
+    .map((p) => ({ name: p.fileName, path: p.outputPath, size: p.size, crc: p.crc, mtime: p.recordedAt }));
 
   async function removeJob(job) {
     if (['queued', 'converting', 'uploading'].includes(job.status)) {
@@ -123,6 +207,9 @@ export async function createApp({ workDir, concurrency = 1 } = {}) {
     for (const job of jobs.values()) {
       if (job.finishedAt && now - job.finishedAt > JOB_TTL_MS) removeJob(job);
     }
+    for (const [id, entry] of ifos) {
+      if (now - entry.createdAt > JOB_TTL_MS) ifos.delete(id);
+    }
   }, 10 * 60 * 1000);
   sweeper.unref();
 
@@ -131,7 +218,12 @@ export async function createApp({ workDir, concurrency = 1 } = {}) {
     const format = (url.searchParams.get('format') || DEFAULT_FORMAT).toLowerCase();
     const quality = url.searchParams.get('quality') || 'balanced';
     const deinterlace = url.searchParams.get('deinterlace') || 'auto';
+    const ifoId = url.searchParams.get('ifo');
+    const mode = url.searchParams.get('mode') || 'split';
+    const ifoEntry = ifoId ? ifos.get(ifoId) : null;
 
+    if (ifoId && !ifoEntry) return sendJson(res, 400, { error: 'Unknown or expired index (VR_MANGR.IFO) — add it again' });
+    if (!['split', 'join'].includes(mode)) return sendJson(res, 400, { error: `Unknown mode "${mode}"` });
     if (!FORMATS[format]) return sendJson(res, 400, { error: `Unknown format "${format}"` });
     if (!QUALITIES[quality]) return sendJson(res, 400, { error: `Unknown quality "${quality}"` });
     if (!DEINTERLACE[deinterlace]) return sendJson(res, 400, { error: `Unknown deinterlace mode "${deinterlace}"` });
@@ -172,23 +264,90 @@ export async function createApp({ workDir, concurrency = 1 } = {}) {
       return sendJson(res, 400, { error: 'Empty upload' });
     }
 
+    if (ifoEntry) {
+      const problem = checkAgainstVro(ifoEntry.ifo, size);
+      if (problem) {
+        await removeJob(job);
+        return sendJson(res, 400, { error: problem });
+      }
+      if (mode === 'join') {
+        job.aspect = commonAspect(ifoEntry.ifo);
+      } else {
+        await fs.mkdir(path.join(dir, 'parts'));
+        job.parts = planRecordings(ifoEntry.ifo, { ext: FORMATS[format].ext }).map((r) => ({
+          ...r,
+          outputPath: path.join(dir, 'parts', r.fileName),
+          status: 'queued',
+          percent: null,
+        }));
+        job.outputName = `${path.parse(name).name || 'recordings'}.zip`;
+      }
+    }
+
     job.status = 'queued';
     queue.push(job);
     pump();
     sendJson(res, 201, view(job));
   }
 
+  function downloadHeaders(fileName, type, size) {
+    const ascii = fileName.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, "'");
+    return {
+      'Content-Type': type,
+      'Content-Length': size,
+      'Content-Disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+      'Cache-Control': 'no-store',
+    };
+  }
+
   async function handleDownload(req, res, job) {
     if (job.status !== 'done') return sendJson(res, 409, { error: `Job is ${job.status}` });
+    if (job.parts) {
+      const layout = layoutZip(zipEntries(job));
+      res.writeHead(200, downloadHeaders(job.outputName, 'application/zip', layout.size));
+      await writeZip(layout, res).catch(() => res.destroy());
+      return;
+    }
     const { size } = await fs.stat(job.outputPath);
-    const ascii = job.outputName.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, "'");
-    res.writeHead(200, {
-      'Content-Type': OUTPUT_MIME[job.format] || 'application/octet-stream',
-      'Content-Length': size,
-      'Content-Disposition': `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(job.outputName)}`,
-      'Cache-Control': 'no-store',
-    });
+    res.writeHead(200, downloadHeaders(job.outputName, OUTPUT_MIME[job.format] || 'application/octet-stream', size));
     await pipeline(createReadStream(job.outputPath), res).catch(() => {});
+  }
+
+  async function handlePartDownload(req, res, job, n) {
+    const part = job.parts?.find((p) => p.number === n);
+    if (!part) return sendJson(res, 404, { error: 'No such recording' });
+    if (part.status !== 'done') return sendJson(res, 409, { error: `Recording is ${part.status}` });
+    res.writeHead(200, downloadHeaders(part.fileName, OUTPUT_MIME[job.format] || 'application/octet-stream', part.size));
+    await pipeline(createReadStream(part.outputPath), res).catch(() => {});
+  }
+
+  async function handleIfo(req, res) {
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of req) {
+      total += chunk.length;
+      if (total > MAX_IFO_BYTES) return sendJson(res, 413, { error: 'That is too large to be a VR_MANGR.IFO' });
+      chunks.push(chunk);
+    }
+    let ifo;
+    try {
+      ifo = parseIfo(Buffer.concat(chunks));
+    } catch (err) {
+      return sendJson(res, 400, { error: err.message });
+    }
+    const id = crypto.randomUUID();
+    ifos.set(id, { ifo, createdAt: Date.now() });
+    const f = ifo.formats[0];
+    sendJson(res, 201, {
+      id,
+      version: ifo.version,
+      cprm: ifo.cprm,
+      format: f ? { ...f.video, audio: f.audio.codec } : null,
+      recordings: ifo.programs.map((p) => ({
+        number: p.number, recorded: p.recorded?.text ?? null, duration: p.duration, size: p.size,
+        label: p.title || p.label || null,
+      })),
+    });
   }
 
   async function handleStatic(req, res, url) {
@@ -227,6 +386,11 @@ export async function createApp({ workDir, concurrency = 1 } = {}) {
       });
     }
 
+    if (parts[1] === 'ifo' && parts.length === 2) {
+      if (req.method === 'POST') return handleIfo(req, res);
+      return sendJson(res, 405, { error: 'Method not allowed' });
+    }
+
     if (parts[1] === 'jobs') {
       if (parts.length === 2) {
         if (req.method === 'GET') return sendJson(res, 200, [...jobs.values()].map(view));
@@ -240,6 +404,9 @@ export async function createApp({ workDir, concurrency = 1 } = {}) {
         if (req.method === 'DELETE') { await removeJob(job); return sendJson(res, 200, { deleted: true }); }
       }
       if (parts[3] === 'download' && req.method === 'GET') return handleDownload(req, res, job);
+      if (parts[3] === 'parts' && parts[5] === 'download' && req.method === 'GET') {
+        return handlePartDownload(req, res, job, Number(parts[4]));
+      }
     }
 
     return sendJson(res, 404, { error: 'Not found' });

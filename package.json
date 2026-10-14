@@ -1,7 +1,7 @@
 {
   "name": "vro-converter",
-  "version": "0.1.0",
-  "description": "Convert DVD-VR .VRO recordings to MP4 (and MKV, MOV, WebM, MP3…) from the browser or the terminal. Runs locally on top of ffmpeg.",
+  "version": "0.2.0",
+  "description": "Convert DVD-VR .VRO recordings to MP4 (and MKV, MOV, WebM, MP3…) — one file per recording using VR_MANGR.IFO — from the browser or the terminal. Runs locally on top of ffmpeg.",
   "type": "module",
   "bin": {
     "vroconv": "src/cli.js"

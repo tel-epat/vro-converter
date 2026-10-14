@@ -27,14 +27,22 @@
         <span>Deinterlace</span>
         <select id="deinterlace"></select>
       </label>
+      <label class="wide">
+        <span>Recordings <small>(when VR_MANGR.IFO is added)</small></span>
+        <select id="mode">
+          <option value="split">One file per recording</option>
+          <option value="join">One file for the whole disc</option>
+        </select>
+      </label>
     </section>
 
     <label id="drop" class="drop" tabindex="0">
-      <input id="file" type="file" multiple accept=".vro,.VRO,.vob,.VOB,.mpg,.mpeg,.ts,video/*">
-      <strong>Drop .VRO files here</strong>
-      <span>or click to choose · several at once is fine</span>
+      <input id="file" type="file" multiple accept=".vro,.VRO,.ifo,.IFO,.vob,.VOB,.mpg,.mpeg,.ts,video/*">
+      <strong>Drop the DVD_RTAV folder here</strong>
+      <span>or <code>VR_MOVIE.VRO</code> + <code>VR_MANGR.IFO</code> · or any video · click to choose files</span>
     </label>
 
+    <p id="index-note" class="note" hidden></p>
     <p id="banner" class="banner" hidden></p>
 
     <section aria-label="Conversions">
@@ -42,7 +50,7 @@
     </section>
 
     <footer>
-      <p>Tip: on a DVD-RAM/-RW disc the recordings are in <code>DVD_RTAV/VR_MOVIE.VRO</code>. Settings apply to files added after you change them.</p>
+      <p>On a DVD-RAM/-RW disc or camcorder, everything is in the <code>DVD_RTAV</code> folder: <code>VR_MOVIE.VRO</code> holds the video, <code>VR_MANGR.IFO</code> says where each recording starts and when it was filmed. Settings apply to files added after you change them.</p>
     </footer>
   </main>
 
@@ -64,6 +72,21 @@
         <span class="status"></span>
         <span class="detail"></span>
       </div>
+      <p class="hint" hidden></p>
+      <details class="recs" hidden open>
+        <summary></summary>
+        <ol class="rec-list"></ol>
+      </details>
+    </li>
+  </template>
+
+  <template id="rec-tpl">
+    <li class="rec">
+      <span class="rec-num"></span>
+      <span class="rec-when"></span>
+      <span class="rec-len"></span>
+      <span class="rec-state"></span>
+      <a class="rec-dl" hidden>Download</a>
     </li>
   </template>
 
